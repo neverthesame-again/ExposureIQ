@@ -1,0 +1,120 @@
+// Group companies in scope. Edit this file to change entities, sizes or tool coverage.
+// r7Factor / mdeFactor scale the base tool coverage for each asset type.
+// maturity < 1 means the company remediates faster than the SLA, > 1 slower.
+export const COMPANIES = [
+  {
+    id: 'corp',
+    name: 'SHV Holdings (Corporate)',
+    short: 'Corporate',
+    prefix: 'CORP',
+    hq: 'Utrecht, NL',
+    sector: 'Group HQ & Shared Services',
+    assets: 64,
+    mix: { Workstation: 0.56, Server: 0.24, 'Network Device': 0.08, 'Cloud VM': 0.12, 'OT / IoT': 0 },
+    r7Factor: 1, mdeFactor: 1, maturity: 0.7, scanDays: 7,
+    sites: ['Utrecht', 'Amsterdam DC'],
+    services: [
+      { name: 'Group Finance Consolidation', tier: 1 },
+      { name: 'Treasury Platform', tier: 1 },
+      { name: 'Identity (Entra ID Connect)', tier: 1 },
+      { name: 'Group Intranet', tier: 3 },
+      { name: 'Collaboration', tier: 3 },
+    ],
+    owner: 'Group IT Operations',
+  },
+  {
+    id: 'energy',
+    name: 'SHV Energy',
+    short: 'SHV Energy',
+    prefix: 'SHVE',
+    hq: 'Hoofddorp, NL',
+    sector: 'LPG & Renewable Energy Distribution',
+    assets: 164,
+    mix: { Workstation: 0.52, Server: 0.22, 'Network Device': 0.07, 'Cloud VM': 0.14, 'OT / IoT': 0.05 },
+    r7Factor: 1, mdeFactor: 1, maturity: 0.8, scanDays: 7,
+    sites: ['Hoofddorp', 'Paris', 'Warsaw', 'Oslo'],
+    services: [
+      { name: 'LPG Order-to-Cash (SAP)', tier: 1 },
+      { name: 'Tank Telemetry Platform', tier: 1 },
+      { name: 'Customer Self-Service Portal', tier: 2 },
+      { name: 'Depot Operations', tier: 2 },
+      { name: 'Office Productivity', tier: 3 },
+    ],
+    owner: 'SHV Energy IT Infrastructure',
+  },
+  {
+    id: 'mammoet',
+    name: 'Mammoet',
+    short: 'Mammoet',
+    prefix: 'MAM',
+    hq: 'Schiedam, NL',
+    sector: 'Heavy Lifting & Transport',
+    assets: 118,
+    mix: { Workstation: 0.5, Server: 0.2, 'Network Device': 0.1, 'Cloud VM': 0.08, 'OT / IoT': 0.12 },
+    r7Factor: 0.78, mdeFactor: 0.92, maturity: 1.45, scanDays: 21,
+    sites: ['Schiedam', 'Houston', 'Singapore', 'Riyadh'],
+    services: [
+      { name: 'Crane Telemetry Platform', tier: 1 },
+      { name: 'Project Engineering (CAD)', tier: 2 },
+      { name: 'Fleet Maintenance', tier: 2 },
+      { name: 'Site Connectivity', tier: 2 },
+      { name: 'Office Productivity', tier: 3 },
+    ],
+    owner: 'Mammoet Global IT',
+  },
+  {
+    id: 'nutreco',
+    name: 'Nutreco',
+    short: 'Nutreco',
+    prefix: 'NUT',
+    hq: 'Amersfoort, NL',
+    sector: 'Animal Nutrition & Aquafeed',
+    assets: 136,
+    mix: { Workstation: 0.5, Server: 0.22, 'Network Device': 0.08, 'Cloud VM': 0.1, 'OT / IoT': 0.1 },
+    r7Factor: 0.95, mdeFactor: 0.97, maturity: 1.0, scanDays: 14,
+    sites: ['Amersfoort', 'Boxmeer', 'Stavanger', 'Santiago'],
+    services: [
+      { name: 'Feed Mill MES', tier: 1 },
+      { name: 'Lab LIMS', tier: 2 },
+      { name: 'B2B eCommerce', tier: 2 },
+      { name: 'Supply Chain Planning', tier: 2 },
+      { name: 'Office Productivity', tier: 3 },
+    ],
+    owner: 'Nutreco Digital & IT',
+  },
+  {
+    id: 'npm',
+    name: 'NPM Capital',
+    short: 'NPM Capital',
+    prefix: 'NPM',
+    hq: 'Amsterdam, NL',
+    sector: 'Private Equity',
+    assets: 42,
+    mix: { Workstation: 0.66, Server: 0.14, 'Network Device': 0.08, 'Cloud VM': 0.12, 'OT / IoT': 0 },
+    r7Factor: 0.7, mdeFactor: 0.9, maturity: 1.15, scanDays: 30,
+    sites: ['Amsterdam'],
+    services: [
+      { name: 'Portfolio Management', tier: 1 },
+      { name: 'Virtual Deal Room', tier: 1 },
+      { name: 'Office Productivity', tier: 3 },
+    ],
+    owner: 'NPM Capital IT (outsourced MSP)',
+  },
+];
+
+// Unified SHV SLA policy — driven by the unified risk priority, not by any single tool's severity.
+export const SLA_POLICY = [
+  { priority: 'P1', label: 'Act now', minRisk: 85, days: 7, description: 'Actively exploited or weaponized on a critical / internet-facing asset' },
+  { priority: 'P2', label: 'Urgent', minRisk: 70, days: 30, description: 'High impact with a known exploit path' },
+  { priority: 'P3', label: 'Planned', minRisk: 50, days: 60, description: 'Moderate risk, fix in the next patch cycle' },
+  { priority: 'P4', label: 'Routine', minRisk: 0, days: 90, description: 'Low risk hygiene items' },
+];
+
+// Base probability that an asset of a given type is covered by each tool.
+export const TOOL_COVERAGE = {
+  Workstation: { mde: 0.965, r7: 0.35 },
+  Server: { mde: 0.87, r7: 0.93 },
+  'Network Device': { mde: 0, r7: 0.9 },
+  'Cloud VM': { mde: 0.84, r7: 0.52 },
+  'OT / IoT': { mde: 0, r7: 0.4 },
+};
