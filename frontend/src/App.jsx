@@ -115,7 +115,7 @@ export default function App() {
               {PERSONAS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
             </select>
           </label>
-          <span className="data-chip" title="All data in this POC is simulated by the mock backend"><span className="pulse" />Simulated data</span>
+          <span className="data-chip" title={meta.data?.dataMode === 'Live connectors' ? 'Syncing from your real Defender / Rapid7 / ServiceNow' : 'Built-in mock tenant: realistic API data. Add credentials in backend/.env to go live'}><span className="pulse" />{meta.data?.dataMode || 'Mock tenant'}{meta.data?.ai?.enabled ? ' · Gemini' : ''}</span>
           <button className="icon-btn" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} aria-label="Toggle theme">
             {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
           </button>

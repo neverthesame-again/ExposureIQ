@@ -87,11 +87,11 @@ export default function Copilot({ company, params, companies, navigate }) {
             <div key={i} className="msg bot">
               <div className="avatar"><Sparkles size={15} /></div>
               <div className="bubble">
-                {m.pending ? <div className="typing" style={{ padding: '8px 0' }}><span /><span /><span /><span className="muted" style={{ width: 'auto', height: 'auto', background: 'none', animation: 'none', marginLeft: 6, fontSize: 12 }}>Copilot agent is planning…</span></div> : (
+                {m.pending ? <div className="typing" style={{ padding: '8px 0' }}><span /><span /><span /><span className="muted" style={{ width: 'auto', height: 'auto', background: 'none', animation: 'none', marginLeft: 6, fontSize: 12 }}>Copilot agent is querying the data…</span></div> : (
                   <>
                     {m.res.trace && (
                       <details className="trace-box" open>
-                        <summary>Agent trace · {m.res.trace.filter((s) => s.type === 'tool').length} tool calls</summary>
+                        <summary>Agent trace · {m.res.trace.filter((s) => s.type === 'tool').length} tool calls · {m.res.engine && m.res.engine !== 'rules' ? `Gemini ${m.res.engine}` : 'rules engine (template answer)'}</summary>
                         <AgentTrace steps={m.res.trace} animate={!!m.live} compact />
                       </details>
                     )}

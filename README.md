@@ -1,98 +1,127 @@
-# ExposureIQ — SHV Group Vulnerability Intelligence (POC)
+# ExposureIQ — SHV Group Vulnerability Intelligence (agentic POC)
 
 > **Use case:** Lack of centralised visibility for cross-group vulnerability information (Rapid7 & Microsoft Defender for Endpoint).
-> **Positioning:** Rapid7 stays a *source* · Microsoft Defender Vulnerability Management (MDVM) becomes the *exposure-management layer* · Power BI is the *reporting layer* · GenAI adds *insight* on top.
+> **Positioning:** Rapid7 stays a *source* · Microsoft Defender Vulnerability Management (MDVM) becomes the *exposure-management layer* · Power BI is the *reporting layer* · four AI agents (Gemini) triage, match, plan and answer on top.
 
-All data is **simulated** by the backend. It is generated deterministically, so every run shows the same numbers, and every screen reconciles with every other screen.
+ExposureIQ runs in one of two modes, chosen automatically from `backend/.env`:
+
+| Mode | When | Data |
+|---|---|---|
+| **Mock tenant** (default) | No source credentials configured | A simulated SHV estate that answers in the exact JSON of the Defender, Rapid7 InsightVM, ServiceNow, CISA KEV and FIRST EPSS APIs, and keeps changing (new vulnerabilities, patches, CMDB edits, KEV additions) |
+| **Live** | Any of Defender / Rapid7 / ServiceNow credentials present | Your real systems. Sources without credentials are switched off. History is kept in `backend/data/state.json` |
+
+Both modes use the same connectors' method signatures, the same normalisation and correlation code, and the same agents.
 
 ## Run it
 
-Requires Node.js 18+.
+Requires Node.js 20.12+.
 
 ```bash
-cd exposureiq-poc/backend
+cd backend
 npm install
 npm start          # http://localhost:4100
 ```
 
 ```bash
-cd exposureiq-poc/frontend
+cd frontend
 npm install
 npm run dev        # http://localhost:5180  (proxies /api → :4100)
 ```
 
-Open http://localhost:5180.
+Open http://localhost:5180. **Data Sources → Connections** shows each connector's mode, last sync, errors and a *Test* button.
 
-## What's inside
+## Turn on the AI agents (Gemini)
 
-| Screen | Who it's for | What it shows |
+Put your key in `backend/.env` (git-ignored) and restart the backend:
+
+```
+GEMINI_API_KEY=your-key
+GEMINI_MODEL=gemini-3.8-flash      # optional
+AGENT_MAX_RUNS_PER_MIN=4           # budget; extra work falls back to the rules engine
+```
+
+Without a key, every agent runs on a deterministic rules engine with the same tools, guardrails and trace format.
+
+## Connect your real systems
+
+Copy what you need from `backend/.env.example` into `backend/.env`, then restart. Credentials stay on the server; the browser never sees them.
+
+| Source | What you need | API used |
 |---|---|---|
-| **Command Center** | Group CISO / leadership | AI executive briefing, enterprise exposure score gauge, KPIs (P1/P2, KEV, SLA, MTTR, MTTI, coverage), 13-week trend, company scorecard, "fix these first", the correlation dividend |
-| **Ask ExposureIQ** | Everyone | GenAI copilot (simulated): board summaries, patch plans, KEV exposure, SLA breaches, company deep dives, CVE explanations. Answers include tables, cited sources and follow-up questions |
-| **Vulnerabilities** | Security analysts | One de-duplicated, risk-ranked list across both tools. Filters, CSV export and a detail drawer with the score breakdown, a "two tools, one truth" comparison, AI remediation guidance and ServiceNow ticket creation |
-| **Assets & Coverage** | Analysts, infra leads | Unified inventory, scanner coverage donut, "who sees what" by asset type, blind spots found by Defender device discovery |
-| **Remediation & SLA** | BU IT leads | SHV unified SLA policy, company × priority compliance heatmap, MTTR vs target, backlog ageing, inflow vs outflow, overdue work, team accountability |
-| **Correlation Engine** | Analysts, auditors | Sankey of 2 raw feeds → unified findings, overlap Venn, MTTI by source, severity disagreements resolved, asset-match review queue |
-| **Data Sources** | Platform team | Animated data pipeline, connector health, sync now, field mappings (MDVM, MDE, Rapid7, CMDB, KEV/EPSS, Power BI, Azure OpenAI) |
-| **Reports** | Leadership, audit | Weekly ops, monthly executive and audit evidence packs. Printable (Save as PDF), with schedules |
-| **Trial & Value Tracker** | Steering group | 90-day MDVM trial countdown, 4-phase PoV plan with tasks you can tick off, success criteria (baseline vs today vs target), prerequisites |
+| **Microsoft Defender for Endpoint / MDVM** | Entra ID app registration with *WindowsDefenderATP* application permissions `Machine.Read.All` and `Vulnerability.Read.All` (admin consent) → `DEFENDER_TENANT_ID`, `DEFENDER_CLIENT_ID`, `DEFENDER_CLIENT_SECRET` | `/api/machines`, `/api/machines/SoftwareVulnerabilitiesByMachine` (first full snapshot), `/api/machines/SoftwareVulnerabilityChangesByMachine` (changes since last sync) |
+| **Rapid7 InsightVM** | Security console URL and a user with read access to the sites in scope → `RAPID7_CONSOLE_URL`, `RAPID7_USERNAME`, `RAPID7_PASSWORD` (optionally `RAPID7_SITE_IDS`). For a self-signed console certificate, start the backend with `NODE_EXTRA_CA_CERTS=path/to/ca.pem` | API v3: `/sites`, `/sites/{id}/assets`, `/assets/{id}/vulnerabilities`, `/vulnerabilities/{id}` |
+| **ServiceNow** | Instance URL and a user with read on the CMDB table and create on the ticket table → `SERVICENOW_*`. Map your CMDB field names with `SERVICENOW_TIER_FIELD`, `SERVICENOW_SERVICE_FIELD`, `SERVICENOW_INTERNET_FIELD` | Table API: `cmdb_ci_computer` (read), `incident` (create) |
+| **CISA KEV · FIRST EPSS** | Nothing (public feeds); used automatically in live mode | KEV JSON feed, EPSS API |
+| **SOC notifications** | Optional `SOC_WEBHOOK_URL` (Teams / Slack incoming webhook) | POST `{ "text": … }` |
 
-Other things to try: the **company selector** (scopes every view), the **persona switcher** (CISO / Analyst / BU IT Lead each land on their own view), **Ctrl + K** search, and the light/dark toggle.
+Group companies are recognised from Defender device-group names, Rapid7 site names and the CMDB `company` field. Edit `backend/src/data/companies.js` so the names match yours. Non-CVE checks (end-of-life software, configuration findings) are mapped between tools in `backend/src/data/crosswalk.js`.
 
-## Live mode
+> The connectors are built against the vendors' documented API formats and tested end-to-end against the mock tenant, which returns the same shapes. Expect to adjust field mappings on first connection to a real tenant: custom CMDB fields, device-group naming, permissions.
 
-The Command Center is live. Every 6 seconds `backend/src/live.js` simulates a batch arriving from one source (Defender, Rapid7 scan job, ServiceNow CMDB or KEV/EPSS). The batch passes through the same six steps a real connector would: collect → normalise → correlate & de-duplicate → risk score → prioritise & SLA → deliver. New findings, confirmed fixes and auto-raised tickets are written to the shared store, so every other screen stays consistent with the live view.
+## How data flows
 
-- `GET /api/live/stream?company=`: Server-Sent Events (`snapshot` on connect, then a `batch` event per tick)
-- `GET /api/live`: the current live view as plain JSON
-- `POST /api/live/trigger` `{ "source": "MDE" | "R7" | "CMDB" | "INTEL" }`: run a batch now (the "Run now" buttons)
+```
+ Defender ─┐                    ┌─ normalise (device ids, CVE / TVM / Rapid7 check ids via crosswalk)
+ Rapid7 ───┼─ connectors ──────►├─ correlate (one asset per device: Defender id → Entra id → hostname → MAC+IP → fuzzy)
+ CMDB ─────┤  (real or mock)    ├─ de-duplicate (one finding per asset × weakness), detect fixes, re-score
+ KEV/EPSS ─┘                    └─ store ──► dashboards · Power BI · AI agents · ServiceNow
+```
 
-Change `TICK_MS` in `live.js` to speed up or slow down the feed. Live changes are in memory and reset when the backend restarts.
+The Command Center streams every sync as a batch that walks six steps: **Collect → Normalise → Correlate → Score & prioritise → AI agent triage → Deliver**.
 
-## AI agents (simulated reasoning)
+| Sync | Mock tenant | Live |
+|---|---|---|
+| Defender | changes every few seconds | first a full snapshot, then changes since the last sync, every `DEFENDER_SYNC_MINUTES` |
+| Rapid7 | a random site's scan | each site in turn; every site re-read once per `RAPID7_SYNC_MINUTES` |
+| CMDB | occasional re-classification of a server to Crown Jewel | every `CMDB_SYNC_MINUTES` |
+| KEV / EPSS | occasional CISA addition | every `INTEL_SYNC_MINUTES` |
 
-`backend/src/agents.js` defines four agents. Each one has a goal, a fixed list of tools and guardrails on what it may do without a person. Every run is stored as a trace (thought → tool call → result → decision) and shown on the **AI Agents** page.
+## The four AI agents
 
-| Agent | Triggered by | Acts alone | Needs a person |
-|---|---|---|---|
-| Triage | Each new P1/P2 or KEV finding in the live feed | Raise tickets, add to existing tickets, escalate to SOC | Risk acceptance |
-| Asset-Match | Each CMDB sync, or "Run now" | Merge at ≥ 90% confidence | Merges below 90% |
-| Remediation Planner | Daily (runs at startup), or "Run now" | Draft campaigns | Submit to ServiceNow |
-| Analyst Copilot | Each question on Ask ExposureIQ | Read-only | — |
+Each agent has a goal, a fixed set of tools and guardrails. The model (Gemini, via function calling) decides what to look up and what to do; **this backend executes actions only after guardrail checks**. Every thought, tool call, guardrail intervention and decision is traced on the **AI Agents** page as it happens.
 
-The reasoning is scripted over the real store, so decisions are consistent with every other screen. In production each agent would be an LLM (e.g. Azure OpenAI) calling the same tools, with guardrails enforced outside the model.
+| Agent | Triggered by | Tools | Acts alone | Needs a person |
+|---|---|---|---|---|
+| **Triage** | New P1/P2 or KEV findings; findings whose priority rises (CMDB or KEV change) | asset context, threat intel, compensating controls (CMDB), open tickets | Tickets, adding to tickets, SOC escalation | Risk acceptance (never allowed for P1/KEV) |
+| **Asset-Match** | CMDB syncs; *Run now* | CMDB record, Defender device, Rapid7 asset, identity comparison | Merge at ≥ 90% **and** identical MAC; keep apart at ≥ 90% | Anything less certain |
+| **Remediation Planner** | Start-up; *Run now* | open findings by team × fix, change calendar | Drafting | Submitting to ServiceNow (campaigns are validated against real findings first) |
+| **Analyst Copilot** | Questions on *Ask ExposureIQ* | read-only KPIs, findings, scorecard, remediation, reconciliation, assets, trend | Answering | — |
 
-- `GET /api/agents`: agents, stats, approvals and recent runs
-- `POST /api/agents/:id/run` (`triage` | `match` | `planner`): run an agent now
-- `POST /api/approvals/:id` `{ "decision": "approve" | "reject" }`
+If Gemini is unavailable, over budget or returns an error, the run finishes on the rules engine, and the trace says so.
 
-## How the mock works
+## Code map
 
 ```
 backend/
-  server.js                 Express API (all endpoints)
-  src/data/companies.js     Group companies, tool coverage, maturity, SLA policy  ← edit to change the story
-  src/data/catalog.js       ~45 real CVEs / config weaknesses, with which tool detects each one
-  src/data/generator.js     Seeded generator: assets, per-tool detections, correlation, remediation history
-  src/analytics.js          KPIs, trends, scorecards, reconciliation, SLA; everything derived from findings
-  src/insights.js           Simulated GenAI: briefings, copilot intents, reports, integrations, PoV tracker
+  server.js                   Express API
+  .env.example                every setting, documented
+  src/config.js               reads .env, picks mock / live mode
+  src/connectors/             Defender, Rapid7, ServiceNow, KEV/EPSS, SOC webhook (real + mock)
+  src/mock/tenant.js          the mock tenant: real API shapes, an estate that changes over time
+  src/ingest/correlate.js     normalisation, asset matching, de-duplication, fix detection, re-scoring
+  src/data/crosswalk.js       non-CVE ids across tools
+  src/live.js                 sync scheduler + live stream (SSE) to the UI
+  src/ai/gemini.js            Gemini client (generateContent + function calling), agent loop, budget
+  src/agents/tools.js         tools the agents can call
+  src/agents.js               the four agents, guardrails, approvals
+  src/state.js                live-mode history (data/state.json)
+  src/data/generator.js       mock-mode history (13 months, seeded)
+  src/analytics.js            KPIs, trends, scorecards, SLA (all screens)
 frontend/src/
-  App.jsx, nav.js           Shell, routing (hash), personas
-  pages/*.jsx               One file per screen
-  components/charts.jsx     Hand-built SVG charts (line, stacked columns, donut, gauge, Venn, Sankey)
+  pages/*.jsx                 one file per screen (Overview = Command Center, Agents, Sources, …)
+  components/LivePipeline.jsx the six-step flow
+  components/AgentTrace.jsx   agent trace viewer
 ```
 
-- **Correlation:** each asset may be covered by Defender, Rapid7, both or neither. A weakness produces one *unified finding* per (asset, CVE), carrying every source that detected it. Raw rows minus unified findings = duplicates removed.
-- **Unified risk score (0–100):** CVSS × 5 (50) + KEV / exploit maturity (20) + EPSS (8) + business criticality from CMDB (15) + internet-facing (10). It maps to the SHV SLA: P1 ≥ 85 → 7 days, P2 ≥ 70 → 30 days, P3 ≥ 50 → 60 days, P4 → 90 days.
-- **MTTI:** Defender detects within ~1 day (agent); Rapid7 detects on its scan cadence (7–30 days per company). Unified MTTI takes the earliest signal from either tool.
-- **State:** tickets, PoV task ticks and connector syncs live in memory and reset when the backend restarts.
+- **Unified risk score (0–100):** CVSS × 5 (50) + KEV / exploit maturity (20) + EPSS (8) + business criticality from CMDB (15) + internet-facing (10). SLA: P1 ≥ 85 → 7 days, P2 ≥ 70 → 30, P3 ≥ 50 → 60, P4 → 90.
 
-## Main API endpoints
+## API
 
-`GET /api/overview?company=` · `GET /api/vulnerabilities` · `GET /api/vulnerabilities/:cve` · `GET /api/assets` · `GET /api/assets/:id` · `GET /api/reconciliation` · `GET /api/remediation` · `POST /api/copilot` · `POST /api/tickets` · `GET /api/integrations` · `POST /api/integrations/:id/sync` · `GET /api/pov` · `GET /api/reports/:type` (weekly | monthly | audit) · `GET /api/search?q=`
+`GET /api/connectors` · `POST /api/connectors/:id/test` · `GET /api/live/stream` (SSE: `snapshot`, `batch`, `batchUpdate`) · `POST /api/live/trigger {source: MDE|R7|CMDB|INTEL}` · `GET /api/agents` · `POST /api/agents/:id/run` · `POST /api/approvals/:id {decision}` · `POST /api/copilot {question, company}` · `GET /api/overview` · `GET /api/vulnerabilities[/:cve]` · `GET /api/assets[/:id]` · `GET /api/reconciliation` · `GET /api/remediation` · `GET /api/reports/:type`
 
-## Path to production (for the discussion)
+## Still to do for production
 
-1. Replace `generator.js` with connectors: Defender XDR API / Advanced Hunting (`DeviceTvmSoftwareVulnerabilities`, `DeviceInfo`), Rapid7 InsightVM API v3, ServiceNow CMDB Table API, CISA KEV + FIRST EPSS feeds.
-2. Persist to a store (e.g. Fabric Lakehouse / Azure SQL) and publish the same model to Power BI.
-3. Swap `insights.js` templates for Azure OpenAI prompts grounded on the computed metrics (EU data boundary; no raw host data in prompts).
+1. Run against a real tenant and adjust field mappings (CMDB fields, device groups, crosswalk).
+2. Move state from `data/state.json` to a database (e.g. Azure SQL / Fabric Lakehouse) and publish the model to Power BI.
+3. Authentication for the UI (Entra ID SSO) and role-based approval rights.
+4. Agent evaluation: replay a week of findings through Triage and compare with analyst decisions before widening its autonomy.

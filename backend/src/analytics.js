@@ -326,7 +326,7 @@ export function r7NameFor(a) {
   return variants[a.hostname.length % variants.length];
 }
 // Uncertain matches still waiting for a person; the asset-match agent clears the confident ones.
-export const needsReview = (a) => a.matchMethod === 'Fuzzy hostname' && a.agentReviewed !== 'rejected';
+export const needsReview = (a) => a.matchMethod === 'Fuzzy hostname' && a.agentReviewed !== 'rejected' && a.agentReviewed !== 'separate';
 
 export function reconciliation(company) {
   const { assets, findings } = scope(company);

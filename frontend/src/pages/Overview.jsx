@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Bot, Hand, Flame, ShieldCheck, Gauge as GaugeIcon, Crosshair, ArrowRight, Pause, Play, Zap, Activity, CheckCircle2, Ticket } from 'lucide-react';
+import { Bot, Hand, Flame, Loader2, ShieldCheck, Gauge as GaugeIcon, Crosshair, ArrowRight, Pause, Play, Zap, Activity, CheckCircle2, Ticket } from 'lucide-react';
 import { useLive, usePoll, api, fmt, agoShort, PRIORITY_COLOR } from '../lib.jsx';
 import { AGENT_META } from '../components/AgentTrace.jsx';
 import { Card, Kpi, RiskPill, SourceBadges, KevBadge, LoadingGrid, useToast } from '../components/ui.jsx';
@@ -81,7 +81,7 @@ export default function Overview({ company, navigate, companies }) {
                       ))}
                       {(b.agentRuns || []).map((r) => (
                         <button key={r.id} className="feed-chip" style={{ '--c': 'var(--ai)' }} onClick={() => navigate('agents', { run: r.id })} title="Open the agent's reasoning">
-                          <Bot size={11} style={{ color: 'var(--ai)' }} />{AGENT_META[r.agent].short}: {r.label}
+                          {r.action === 'running' ? <Loader2 size={11} className="spin" style={{ color: 'var(--ai)' }} /> : <Bot size={11} style={{ color: 'var(--ai)' }} />}{AGENT_META[r.agent].short}: {r.cve ? `${r.cve} · ` : ''}{r.label}
                         </button>
                       ))}
                       {b.tickets.map((t) => (
@@ -123,7 +123,7 @@ export default function Overview({ company, navigate, companies }) {
 function AgentsPanel({ data, navigate }) {
   if (!data) return null;
   return (
-    <Card className="ai-card" title="AI agents at work" sub="Simulated reasoning in this POC" icon={<Bot size={16} style={{ color: 'var(--ai)' }} />}
+    <Card className="ai-card" title="AI agents at work" sub={data.ai?.enabled ? `Reasoning with Gemini · ${data.ai.model}` : 'Rules engine: add a Gemini key to switch to AI reasoning'} icon={<Bot size={16} style={{ color: 'var(--ai)' }} />}
       action={<button className="link-btn" onClick={() => navigate('agents')}>Open <ArrowRight size={13} /></button>}>
       <div className="col" style={{ gap: 2 }}>
         {data.agents.map((a) => {
@@ -135,7 +135,7 @@ function AgentsPanel({ data, navigate }) {
               <span style={{ flex: 1, minWidth: 0 }}>
                 <span style={{ display: 'block', fontWeight: 600, color: 'var(--text)', fontSize: 12.5 }}>{a.name}</span>
                 <span style={{ display: 'block', fontSize: 11.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {a.working ? 'Working…' : last ? `${last.decision.label} · ${agoShort(last.at)}` : 'Waiting for work'}
+                  {a.working ? 'Working…' : last ? `${last.decision?.label || 'Working…'} · ${agoShort(last.at)}` : 'Waiting for work'}
                 </span>
               </span>
               <span className="muted num" style={{ fontSize: 11.5 }}>{a.stats.runs}</span>

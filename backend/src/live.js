@@ -1,206 +1,260 @@
-// Live feed simulation. Every few seconds one source delivers a batch of records, and the batch
-// goes through the same steps a production connector would: collect → normalise → correlate →
-// score → prioritise → deliver. Batches change the shared store, so every screen moves with them.
+// Sync engine. Each source is pulled through its connector, normalised and correlated into the
+// store, and the result is streamed to the UI as a "batch" that walks the six pipeline steps.
+//   mock mode: a batch every DEMO_TICK_MS from a random source, against the mock tenant
+//   live mode: each configured source on its own schedule (DEFENDER_SYNC_MINUTES etc.)
+// Agents run after ingestion; their decisions arrive later as a batch update.
 import { COMPANIES, SLA_POLICY } from './data/companies.js';
-import { CATALOG, catalogById } from './data/catalog.js';
-import { store, computeRisk, priorityFor, slaState } from './data/generator.js';
+import { catalogById } from './data/catalog.js';
+import { store } from './data/generator.js';
+import { config } from './config.js';
+import { defender, rapid7, servicenow, intel, connectorStatus } from './connectors/index.js';
+import * as C from './ingest/correlate.js';
+import * as mock from './mock/tenant.js';
 import { kpis, topRisks, isOpen } from './analytics.js';
 import { briefing, runSync } from './insights.js';
 import { triage, runAssetMatch } from './agents.js';
+import { saveState } from './state.js';
 
-const TICK_MS = 6000;
 const SOURCES = {
-  MDE: { label: 'Defender for Endpoint', flag: 'mde', syncs: ['mde', 'mdvm'] },
-  R7: { label: 'Rapid7 InsightVM', flag: 'r7', syncs: ['r7'] },
-  CMDB: { label: 'ServiceNow CMDB', syncs: ['cmdb'] },
-  INTEL: { label: 'CISA KEV · EPSS', syncs: ['kev'] },
+  MDE: { label: 'Defender for Endpoint', connector: defender, syncs: ['mde', 'mdvm'], minutes: config.defender.syncMinutes },
+  R7: { label: 'Rapid7 InsightVM', connector: rapid7, syncs: ['r7'], minutes: config.rapid7.syncMinutes },
+  CMDB: { label: 'ServiceNow CMDB', connector: servicenow, syncs: ['cmdb'], minutes: config.servicenow.syncMinutes },
+  INTEL: { label: 'CISA KEV · EPSS', connector: intel, syncs: ['kev'], minutes: config.intel.syncMinutes },
 };
 const WEIGHTS = [['MDE', 0.45], ['R7', 0.25], ['CMDB', 0.15], ['INTEL', 0.15]];
+const enabled = (src) => SOURCES[src].connector.status.mode !== 'off';
 const coShort = Object.fromEntries(COMPANIES.map((c) => [c.id, c.short]));
-
-const rnd = Math.random;
-const int = (a, b) => a + Math.floor(rnd() * (b - a + 1));
-const pick = (arr) => arr[Math.floor(rnd() * arr.length)];
-const weighted = (pairs) => {
-  let x = rnd() * pairs.reduce((s, [, w]) => s + w, 0);
-  for (const [v, w] of pairs) if ((x -= w) <= 0) return v;
-  return pairs[pairs.length - 1][0];
-};
-const sample = (arr, n) => {
-  const a = [...arr];
-  for (let i = 0; i < Math.min(n, a.length); i++) {
-    const j = i + Math.floor(rnd() * (a.length - i));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a.slice(0, n);
-};
+const plural = (n, one, many = `${one}s`) => `${Number(n).toLocaleString('en-GB')} ${n === 1 ? one : many}`;
 const lc = (t) => t.charAt(0).toLowerCase() + t.slice(1);
-const plural = (n, one, many = `${one}s`) => `${n.toLocaleString('en-GB')} ${n === 1 ? one : many}`;
+const urgent = (f) => f.priority === 'P1' || f.priority === 'P2';
+const host = (f) => store.assetById[f.assetId]?.hostname || f.assetId;
 
 let seq = 0;
-let nextFinding = store.findings.length + 1;
+let r7Cursor = 0;
 const startedAt = new Date().toISOString();
-let nextAt = Date.now() + TICK_MS;
+const nextRun = {};
+const busy = {};
 const recent = [];
 const totals = { batches: 0, received: 0, filtered: 0, normalised: 0, merged: 0, newFindings: 0, scored: 0, kev: 0, p1p2: 0, agentDecisions: 0, remediated: 0, tickets: 0, published: 0 };
+let broadcast = () => {};
 
-const seenBy = (f, flag) => store.assetById[f.assetId][flag] && catalogById[f.cve].detect[flag];
+async function pool(items, n, fn) {
+  const queue = [...items];
+  await Promise.all(Array.from({ length: Math.min(n, queue.length) }, async () => { while (queue.length) await fn(queue.shift()); }));
+}
 
-function scannerBatch(src) {
-  const { flag, label } = SOURCES[src];
-  // A Rapid7 scan job covers one company's sites; Defender agents report from everywhere.
-  const company = src === 'R7' ? pick(COMPANIES).id : null;
-  const inScope = (x) => !company || x.company === company;
-  const open = store.findings.filter((f) => f.status === 'Open' && inScope(f) && seenBy(f, flag));
-  const openKeys = new Set(store.findings.filter(isOpen).map((f) => `${f.assetId}|${f.cve}`));
-
-  // 1. Records describing issues we already know about → merged into the existing finding.
-  const known = sample(open, src === 'R7' ? int(18, 50) : int(6, 20));
-  let nowBoth = 0;
-  for (const f of known) {
-    if (!f.sources.includes(src)) { f.sources.push(src); nowBoth++; }
-    f.detected[src] = 0;
+// ---------------- per-source pulls ----------------
+async function pullDefender() {
+  const since = defender.status.lastSync;
+  if (config.mode === 'mock') mock.worldStep();
+  if (!since && config.mode === 'live') {
+    for (const m of await defender.machines()) C.upsertDefenderMachine(m);
+    return { st: C.ingestDefenderVulns(await defender.vulnerabilitiesFull(), { full: true }), scope: 'full snapshot' };
   }
+  const rows = await defender.vulnerabilityChanges(since || new Date(Date.now() - 120000).toISOString());
+  return { st: C.ingestDefenderVulns(rows), scope: 'changes since last sync' };
+}
 
-  // 2. Fixes the tool can now confirm (the vulnerable software / config is gone).
-  const fixed = sample(open.filter((f) => !known.includes(f)), src === 'R7' ? int(0, 2) : int(0, 3));
-  for (const f of fixed) {
-    f.status = 'Remediated';
-    f.remediatedAgo = 0;
-    f.sla = slaState(f);
-    openKeys.delete(`${f.assetId}|${f.cve}`);
-    const t = store.tickets.find((x) => x.cve === f.cve && x.company === f.company && x.state !== 'Resolved');
-    if (t && !store.findings.some((o) => o.cve === f.cve && o.company === f.company && isOpen(o))) t.state = 'Resolved';
-  }
+async function pullRapid7() {
+  const sites = await rapid7.sites();
+  if (!sites.length) throw new Error('No Rapid7 sites visible to this user');
+  const site = config.mode === 'mock' ? sites[Math.floor(Math.random() * sites.length)] : sites[r7Cursor++ % sites.length];
+  if (config.mode === 'mock') mock.worldStep({ companyId: mock.mockSites.find((s) => s.id === site.id)?.company, add: [0, 1, 1, 2], fix: [0, 0, 1, 1] });
+  const assets = await rapid7.siteAssets(site.id);
+  const vulns = new Map();
+  const defs = new Map();
+  await pool(assets, 4, async (a) => vulns.set(a.id, await rapid7.assetVulnerabilities(a.id)));
+  const keys = [...new Set([...vulns.values()].flat().map((v) => v.id))];
+  await pool(keys, 4, async (k) => defs.set(k, await rapid7.vulnerability(k)));
+  const st = C.ingestRapid7Site(site, assets, vulns, defs);
+  return { st, scope: `${site.name} scan`, assets: assets.length, company: C.companyFor({ site: site.name }) };
+}
 
-  // 3. Genuinely new weaknesses.
-  const want = weighted([[0, 0.25], [1, 0.4], [2, 0.25], [3, 0.1]]);
-  const assets = store.assets.filter((a) => a[flag] && inScope(a));
-  const created = [];
-  for (let tries = 0; created.length < want && tries < 60; tries++) {
-    const a = pick(assets);
-    const cats = CATALOG.filter((c) => c.detect[flag] && c.category !== 'End of Life' && c.tags.some((t) => a.tags.includes(t)) && !openKeys.has(`${a.id}|${c.id}`));
-    if (!cats.length) continue;
-    const cat = weighted(cats.map((c) => [c, c.prob]));
-    const risk = computeRisk(cat, a).total;
-    const p = priorityFor(risk);
-    const f = {
-      id: `F-${String(nextFinding++).padStart(6, '0')}`,
-      cve: cat.id, assetId: a.id, company: a.company,
-      sources: [src], detected: { [src]: 0 },
-      exposureAgo: +(rnd() * (src === 'R7' ? 3 : 0.5)).toFixed(2), detectedAgo: 0,
-      status: 'Open', remediatedAgo: null, risk, priority: p.priority, slaDays: p.days, live: true,
-    };
-    f.sla = slaState(f);
-    store.findings.push(f);
-    openKeys.add(`${a.id}|${cat.id}`);
-    created.push(f);
-  }
+async function pullCmdb() {
+  const change = config.mode === 'mock' ? mock.servicenow.maybeChangeCi() : null;
+  return { st: C.ingestCmdb(await servicenow.cmdb()), change };
+}
 
-  // 4. The triage agent decides what happens to each urgent or actively exploited finding.
-  const triaged = created.filter((f) => f.priority === 'P1' || f.priority === 'P2' || catalogById[f.cve].kev).slice(0, 3).map(triage);
-  const tickets = triaged.filter((x) => x.ticket).map((x) => x.ticket);
-  const agentRuns = triaged.map((x) => x.run);
+async function pullIntel() {
+  if (config.mode === 'mock') mock.intel.maybeAddToKev();
+  const kev = await intel.kev();
+  const open = [...new Set(store.findings.filter(isOpen).map((f) => f.cve))];
+  const epss = await intel.epss(open);
+  const st = C.ingestThreatIntel(kev, epss);
+  return { st, kevCount: kev.length, epssCount: epss.length, kevInEstate: kev.filter((k) => catalogById[k.cveID]).length };
+}
 
-  const filtered = src === 'R7' ? int(4, 18) : int(0, 4);
-  const normalised = known.length + fixed.length + created.length;
-  const received = normalised + filtered;
-  const byP = ['P1', 'P2', 'P3', 'P4'].map((p) => [p, created.filter((f) => f.priority === p).length]).filter(([, n]) => n);
-  const top = [...created].sort((a, b) => b.risk - a.risk)[0];
-  const kevNew = created.filter((f) => catalogById[f.cve].kev).length;
-  const p1p2 = created.filter((f) => f.priority === 'P1' || f.priority === 'P2').length;
-  const host = (f) => store.assetById[f.assetId].hostname;
-  const sla = (p) => `${p} ${SLA_POLICY.find((x) => x.priority === p).days} d`;
-
+// ---------------- one batch ----------------
+function counts(st, extra = {}) {
   return {
-    company,
-    counts: { received, filtered, normalised, merged: known.length, nowBoth, newFindings: created.length, scored: created.length, kev: kevNew, p1p2, agentDecisions: agentRuns.length, remediated: fixed.length, tickets: tickets.length, published: normalised },
-    steps: [
-      `${plural(received, 'record')} received from ${label}${company ? ` (${coShort[company]} scan job)` : ' agents'}.`,
-      `${filtered ? `${plural(filtered, 'informational check')} dropped. ` : ''}${plural(normalised, 'record')} matched to CMDB assets with standard CVE IDs and severity.`,
-      `${known.length} already known → merged${nowBoth ? ` (${nowBoth} now confirmed by both tools)` : ''}. ${plural(created.length, 'new finding')}${fixed.length ? `, ${plural(fixed.length, 'fix', 'fixes')} confirmed` : ''}.`,
-      top ? `${top.cve} on ${host(top)} scored ${top.risk}/100${catalogById[top.cve].kev ? ' (actively exploited)' : ''}. ${byP.map(([p, n]) => `${n} × ${p}`).join(', ')}; SLA clock started (${byP.map(([p]) => sla(p)).join(', ')}).` : 'Nothing new to score in this batch.',
-      agentRuns.length ? `Triage agent reviewed ${plural(agentRuns.length, 'finding')}: ${agentRuns.map((r) => `${r.subject.cve} → ${lc(r.decision.label)}`).join('; ')}.` : 'Nothing urgent, so the triage agent was not needed.',
-      `${tickets.length ? `${tickets.map((t) => t.id).join(', ')} raised by the agent. ` : ''}Power BI and dashboards refreshed.`,
-    ],
-    summary: `${plural(received, 'record')} → ${known.length} merged, ${created.length} new${p1p2 ? ` (${p1p2} urgent)` : ''}${fixed.length ? `, ${fixed.length} fixed` : ''}`,
-    newFindings: created.map((f) => ({ id: f.id, cve: f.cve, title: catalogById[f.cve].title, hostname: host(f), company: f.company, companyName: coShort[f.company], risk: f.risk, priority: f.priority, kev: catalogById[f.cve].kev })),
-    fixed: fixed.map((f) => ({ cve: f.cve, hostname: host(f), companyName: coShort[f.company] })),
-    tickets: tickets.map((t) => ({ id: t.id, cve: t.cve, assignee: t.assignee })),
-    agentRuns: agentRuns.map((r) => ({ id: r.id, agent: r.agent, cve: r.subject.cve, label: r.decision.label, action: r.decision.action })),
+    received: st.received, filtered: st.filtered, normalised: st.normalised, merged: st.merged, nowBoth: st.nowBoth,
+    newFindings: st.created.length, scored: st.created.length + st.rescored, kev: st.created.filter((f) => catalogById[f.cve].kev).length + st.newlyKev.length,
+    p1p2: st.created.filter(urgent).length + st.priorityChanges.filter((c) => urgent(c.finding)).length,
+    agentDecisions: 0, remediated: st.fixed.length, tickets: 0, published: st.normalised, ...extra,
   };
 }
 
-function enrichmentBatch(src) {
-  const open = store.findings.filter(isOpen);
-  if (src === 'CMDB') {
-    const cis = int(12, 40);
-    // A CMDB refresh is when uncertain device matches can be settled, so the asset-match agent runs here.
-    const run = runAssetMatch();
-    return {
-      company: null,
-      counts: { received: cis, filtered: 0, normalised: cis, merged: 0, nowBoth: 0, newFindings: 0, scored: 0, kev: 0, p1p2: 0, agentDecisions: run ? 1 : 0, remediated: 0, tickets: 0, published: cis },
-      steps: [
-        `${cis} configuration items received from ServiceNow CMDB.`,
-        `All ${cis} matched to known assets by Entra device ID or hostname.`,
-        'Enrichment only: owners and business services checked, no conflicts.',
-        `Business criticality re-applied to ${plural(open.length, 'open finding')}; no priority changes.`,
-        run ? `Asset-Match agent checked ${run.title}: ${lc(run.decision.label)}.` : 'No uncertain device matches left for the Asset-Match agent.',
-        'Owner routing for tickets updated.',
-      ],
-      summary: `${cis} CIs refreshed; owners and criticality confirmed`,
-      newFindings: [], fixed: [], tickets: [],
-      agentRuns: run ? [{ id: run.id, agent: run.agent, cve: null, label: `${run.subject.hostname}: ${run.decision.label}`, action: run.decision.action }] : [],
-    };
-  }
-  const updates = int(3, 12);
-  const hit = sample([...new Set(open.map((f) => f.cve))], int(1, 5));
-  const matched = hit.length;
-  const touched = open.filter((f) => hit.includes(f.cve)).length;
-  return {
-    company: null,
-    counts: { received: updates, filtered: updates - matched, normalised: matched, merged: 0, nowBoth: 0, newFindings: 0, scored: 0, kev: 0, p1p2: 0, agentDecisions: 0, remediated: 0, tickets: 0, published: matched },
-    steps: [
-      `${updates} KEV / EPSS updates received from public threat intelligence.`,
-      `${plural(matched, 'CVE')} present in the SHV estate; ${updates - matched} not relevant, dropped.`,
-      'Enrichment only: no new findings.',
-      `No priority changes. Exploit likelihood refreshed for ${plural(touched, 'open finding')} (${hit.slice(0, 2).join(', ')}${matched > 2 ? '…' : ''}).`,
-      'No new findings, so no agent decisions needed.',
-      'Threat-intel fields updated in Power BI.',
-    ],
-    summary: `${updates} threat-intel updates, ${matched} relevant to the estate`,
-    newFindings: [], fixed: [], tickets: [], agentRuns: [],
-  };
+function scoreLine(st) {
+  const top = [...st.created].sort((a, b) => b.risk - a.risk)[0];
+  if (!top) return st.rescored ? `${plural(st.rescored, 'open finding')} re-scored${st.priorityChanges.length ? `; ${plural(st.priorityChanges.length, 'priority change')}` : '; no priority changes'}.` : 'Nothing new to score in this batch.';
+  const byP = ['P1', 'P2', 'P3', 'P4'].map((p) => [p, st.created.filter((f) => f.priority === p).length]).filter(([, n]) => n);
+  return `${top.cve} on ${host(top)} scored ${top.risk}/100${catalogById[top.cve].kev ? ' (actively exploited)' : ''}. ${byP.map(([p, n]) => `${n} × ${p}`).join(', ')}; SLA clock started (${byP.map(([p]) => `${p} ${SLA_POLICY.find((x) => x.priority === p).days} d`).join(', ')}).`;
 }
 
-export function runBatch(forced) {
-  const source = SOURCES[forced] ? forced : weighted(WEIGHTS);
-  const b = SOURCES[source].flag ? scannerBatch(source) : enrichmentBatch(source);
-  Object.assign(b, { id: ++seq, at: new Date().toISOString(), source, sourceLabel: SOURCES[source].label });
+async function runSource(src) {
+  if (busy[src] || !enabled(src)) return null;
+  busy[src] = true;
+  const S = SOURCES[src];
+  const syncStart = new Date().toISOString();
+  const b = { id: ++seq, at: syncStart, source: src, sourceLabel: S.label, mode: S.connector.status.mode, company: null, newFindings: [], fixed: [], tickets: [], agentRuns: [] };
+  try {
+    let st;
+    if (src === 'MDE') {
+      const r = await pullDefender();
+      st = r.st;
+      b.counts = counts(st);
+      b.steps = [
+        `${plural(st.received, 'record')} received from Defender (${r.scope}).`,
+        `${st.filtered ? `${plural(st.filtered, 'software-inventory row')} without a CVE dropped. ` : ''}${plural(st.normalised, 'record')} mapped to ExposureIQ assets and vulnerability ids.`,
+        `${st.merged} already known → merged${st.nowBoth ? ` (${st.nowBoth} now confirmed by both tools)` : ''}. ${plural(st.created.length, 'new finding')}${st.fixed.length ? `, ${plural(st.fixed.length, 'fix', 'fixes')} confirmed by Defender` : ''}${st.newAssets ? `, ${plural(st.newAssets, 'new device')}` : ''}.`,
+        scoreLine(st), '', '',
+      ];
+      b.summary = `${plural(st.received, 'record')} → ${st.merged} merged, ${st.created.length} new${st.created.filter(urgent).length ? ` (${st.created.filter(urgent).length} urgent)` : ''}${st.fixed.length ? `, ${st.fixed.length} fixed` : ''}`;
+    } else if (src === 'R7') {
+      const r = await pullRapid7();
+      st = r.st;
+      b.company = r.company;
+      b.counts = counts(st);
+      b.steps = [
+        `${plural(r.assets, 'asset')} and ${plural(st.received, 'vulnerability record')} from Rapid7 (${r.scope}).`,
+        `${st.filtered ? `${plural(st.filtered, 'unconfirmed ("potential") check')} dropped. ` : ''}${plural(st.normalised, 'record')} mapped to ExposureIQ assets and vulnerability ids.`,
+        `${st.merged} already known → merged${st.nowBoth ? ` (${st.nowBoth} now confirmed by both tools)` : ''}. ${plural(st.created.length, 'new finding')}${st.fixed.length ? `, ${plural(st.fixed.length, 'fix', 'fixes')} confirmed by the rescan` : ''}.`,
+        scoreLine(st), '', '',
+      ];
+      b.summary = `${plural(st.received, 'record')} → ${st.merged} merged, ${st.created.length} new${st.fixed.length ? `, ${st.fixed.length} fixed` : ''}`;
+    } else if (src === 'CMDB') {
+      const r = await pullCmdb();
+      st = r.st;
+      b.counts = counts(st);
+      b.steps = [
+        `${plural(st.received, 'configuration item')} received from ServiceNow.`,
+        `${plural(st.normalised, 'CI')} matched to assets${st.newAssets ? `; ${plural(st.newAssets, 'new asset')} added` : ''}.`,
+        'Enrichment only: owners, services and criticality checked.',
+        r.change ? `${r.change.hostname} now supports ${r.change.service} (Crown Jewel): ${plural(st.rescored, 'finding')} re-scored, ${plural(st.priorityChanges.length, 'priority change')}.` : `Business context confirmed${st.rescored ? `; ${plural(st.rescored, 'finding')} re-scored` : ''}.`,
+        '', 'Owner routing for tickets updated.',
+      ];
+      b.summary = r.change ? `${r.change.hostname} re-classified as Crown Jewel; ${st.priorityChanges.length} priority changes` : `${plural(st.received, 'CI')} refreshed; context confirmed`;
+    } else {
+      const r = await pullIntel();
+      st = r.st;
+      b.counts = counts(st, { received: r.kevCount + r.epssCount, filtered: r.kevCount - r.kevInEstate, normalised: r.kevInEstate + r.epssCount });
+      b.steps = [
+        `${plural(r.kevCount, 'KEV entry', 'KEV entries')} and ${plural(r.epssCount, 'EPSS score')} received.`,
+        `${plural(r.kevCount - r.kevInEstate, 'KEV entry', 'KEV entries')} not present in the estate dropped; ${r.kevInEstate} matched.`,
+        'Enrichment only: no new findings.',
+        st.newlyKev.length ? `CISA added ${st.newlyKev.join(', ')} to KEV: ${plural(st.rescored, 'finding')} re-scored, ${plural(st.priorityChanges.length, 'priority change')}.` : `Exploit likelihood refreshed; ${plural(st.rescored, 'finding')} re-scored, ${plural(st.priorityChanges.length, 'priority change')}.`,
+        '', 'Threat-intel fields updated in Power BI.',
+      ];
+      b.summary = st.newlyKev.length ? `${st.newlyKev.join(', ')} added to CISA KEV` : `EPSS refreshed for ${plural(r.epssCount, 'CVE')}`;
+    }
+    b.newFindings = st.created.map((f) => ({ id: f.id, cve: f.cve, title: catalogById[f.cve].title, hostname: host(f), company: f.company, companyName: coShort[f.company], risk: f.risk, priority: f.priority, kev: catalogById[f.cve].kev }));
+    b.fixed = st.fixed.map((f) => ({ cve: f.cve, hostname: host(f), companyName: coShort[f.company] }));
+    S.connector.status.lastSync = syncStart;
+    S.connector.status.lastError = null;
+    S.connector.status.lastCount = st.received;
+    [...S.syncs, 'pbi'].forEach(runSync);
+
+    // ---- AI agents ----
+    const forTriage = [
+      ...st.created.filter((f) => urgent(f) || catalogById[f.cve].kev),
+      ...st.priorityChanges.filter((c) => urgent(c.finding) && !urgent({ priority: c.from })).map((c) => c.finding),
+      ...store.findings.filter((f) => st.newlyKev.includes(f.cve) && f.status === 'Open'),
+    ].filter((f, i, arr) => !f.triaged && arr.indexOf(f) === i).slice(0, 3);
+    const jobs = forTriage.map((f) => { const promise = triage(f); return { cve: f.cve, promise, runId: f.triageRunId }; });
+    if (src === 'CMDB') {
+      const a = store.assets.find((x) => x.matchMethod === 'Fuzzy hostname' && !x.agentReviewed && x.mde && x.r7);
+      if (a) { const promise = runAssetMatch(a.id); jobs.push({ cve: null, hostname: a.hostname, promise, runId: a.matchRunId, agent: 'match' }); }
+    }
+    b.agentRuns = jobs.map((j) => ({ id: j.runId, agent: j.agent || 'triage', cve: j.cve, hostname: j.hostname, label: 'Working…', action: 'running' }));
+    b.steps[4] = jobs.length ? `${jobs.length === 1 ? 'Agent' : `${jobs.length} agents`} working on ${b.agentRuns.map((r) => r.cve || `${r.hostname} (device match)`).join(', ')}…` : 'Nothing urgent, so no agent was needed.';
+    b.steps[5] ||= 'Dashboards and Power BI dataset refreshed.';
+    if (jobs.length) Promise.allSettled(jobs.map((j) => j.promise)).then((results) => agentsDone(b, results));
+  } catch (e) {
+    S.connector.status.lastError = `${e.message}${e.body ? ` · ${e.body.slice(0, 160)}` : ''}`;
+    b.error = S.connector.status.lastError;
+    b.counts = { received: 0, filtered: 0, normalised: 0, merged: 0, newFindings: 0, scored: 0, kev: 0, p1p2: 0, agentDecisions: 0, remediated: 0, tickets: 0, published: 0 };
+    b.steps = [`${S.label} sync failed: ${b.error}`, 'Skipped.', 'Skipped.', 'Skipped.', 'Skipped.', 'Nothing published.'];
+    b.summary = `Sync failed: ${e.message}`;
+  } finally {
+    busy[src] = false;
+  }
   for (const k of Object.keys(totals)) if (k in b.counts) totals[k] += b.counts[k];
   totals.batches++;
   recent.unshift(b);
-  recent.length = Math.min(recent.length, 20);
-  [...SOURCES[source].syncs, 'pbi', ...(b.counts.tickets ? ['snow'] : [])].forEach(runSync);
+  recent.length = Math.min(recent.length, 25);
+  broadcast('batch', b);
+  saveState();
   return b;
 }
 
+function agentsDone(b, results) {
+  let decisions = 0;
+  let tickets = 0;
+  results.forEach((r, i) => {
+    const out = r.value;
+    const run = out?.run || out; // triage returns { run, ticket }; asset-match returns the run
+    const entry = b.agentRuns[i];
+    if (!run?.decision) { entry.label = 'No decision'; entry.action = 'error'; return; }
+    decisions++;
+    Object.assign(entry, { id: run.id, label: run.decision.label, action: run.decision.action, engine: run.engine });
+    if (out?.ticket) { tickets++; b.tickets.push({ id: out.ticket.id, cve: out.ticket.cve, assignee: out.ticket.assignee }); }
+  });
+  b.counts.agentDecisions = decisions;
+  b.counts.tickets = tickets;
+  totals.agentDecisions += decisions;
+  totals.tickets += tickets;
+  const engines = [...new Set(b.agentRuns.map((r) => r.engine).filter(Boolean))].map((e) => (e === 'rules' ? 'rules engine' : `Gemini ${e}`));
+  b.steps[4] = `${b.agentRuns.map((r) => `${r.agent === 'match' ? 'Asset-Match' : 'Triage'}: ${r.cve ? `${r.cve} → ` : `${r.hostname} → `}${lc(r.label)}`).join('; ')}${engines.length ? ` (${engines.join(', ')})` : ''}.`;
+  b.steps[5] = `${b.tickets.length ? `${b.tickets.map((t) => t.id).join(', ')} raised in ServiceNow. ` : ''}Dashboards and Power BI dataset refreshed.`;
+  broadcast('batchUpdate', b);
+  saveState();
+}
+
+// ---------------- scheduling ----------------
+function pickMock() {
+  let x = Math.random();
+  for (const [s, w] of WEIGHTS) if ((x -= w) <= 0) return s;
+  return 'MDE';
+}
+
+function schedule(src, delayMs) {
+  nextRun[src] = Date.now() + delayMs;
+  setTimeout(async () => {
+    await runSource(src);
+    let next = SOURCES[src].minutes * 60000;
+    if (src === 'R7') {
+      const n = Math.max(1, (await rapid7.sites().catch(() => [])).length);
+      next = Math.max(60000, next / n); // every site is re-read once per RAPID7_SYNC_MINUTES
+    }
+    schedule(src, next);
+  }, delayMs);
+}
+
+const nextAt = () => (config.mode === 'mock' ? nextRun.mock : Math.min(...Object.values(nextRun).filter(Boolean), Date.now() + 3600000));
+
 function view(company) {
-  const b = briefing(company);
   return {
-    kpis: kpis(company),
-    topRisks: topRisks(company, 5),
-    briefing: { headline: b.headline },
-    totals, startedAt, tickMs: TICK_MS, nextAt,
+    kpis: kpis(company), topRisks: topRisks(company, 5), briefing: { headline: briefing(company).headline },
+    totals, startedAt, tickMs: config.demoTickMs, nextAt: nextAt(), mode: config.mode, sources: connectorStatus(),
   };
 }
 
 export function attachLive(app) {
   const clients = new Set();
   const send = (c, event, data) => c.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-  const broadcast = (batch) => {
+  broadcast = (event, batch) => {
     const views = {};
-    for (const c of clients) send(c, 'batch', { batch, ...(views[c.company] ||= view(c.company)) });
+    for (const c of clients) send(c, event, { batch, ...(views[c.company] ||= view(c.company)) });
   };
 
   app.get('/api/live', (req, res) => res.json({ ...view(req.query.company || 'all'), recent }));
@@ -213,14 +267,19 @@ export function attachLive(app) {
     req.on('close', () => clients.delete(c));
   });
   app.post('/api/live/trigger', (req, res) => {
-    const b = runBatch(req.body?.source);
-    broadcast(b);
-    res.json({ id: b.id });
+    const src = SOURCES[req.body?.source] ? req.body.source : 'MDE';
+    if (!enabled(src)) return res.status(400).json({ error: `${SOURCES[src].label} is not configured` });
+    runSource(src);
+    res.json({ started: src });
   });
-
-  setInterval(() => {
-    nextAt = Date.now() + TICK_MS;
-    broadcast(runBatch());
-  }, TICK_MS);
   setInterval(() => { for (const c of clients) c.res.write(': ping\n\n'); }, 20000);
+
+  if (config.mode === 'mock') {
+    const tick = () => { nextRun.mock = Date.now() + config.demoTickMs; setTimeout(async () => { await runSource(pickMock()); tick(); }, config.demoTickMs); };
+    tick();
+  } else {
+    // First pass in a sensible order: context (CMDB) first, then findings, then enrichment.
+    let delay = 2000;
+    for (const src of ['CMDB', 'MDE', 'INTEL', 'R7']) if (enabled(src)) { schedule(src, delay); delay += 15000; }
+  }
 }

@@ -5,6 +5,7 @@ import { Card, LoadingGrid, ErrorState, useToast } from '../components/ui.jsx';
 import AgentTrace, { AGENT_META } from '../components/AgentTrace.jsx';
 
 const STATUS = {
+  running: ['Working…', 'badge-ai'],
   done: ['Done', 'badge-good'],
   awaiting: ['Awaiting approval', 'badge-warn'],
   approved: ['Approved by a person', 'badge-good'],
@@ -30,7 +31,7 @@ export default function Agents({ params, navigate, company }) {
     const newest = runs[0];
     if (newest && !seen.current.has(newest.id)) {
       runs.forEach((r) => seen.current.add(r.id));
-      if (follow) { setSel(newest.id); setFresh(newest.id); }
+      if (follow) { setSel(newest.id); setFresh(newest.status === 'running' ? null : newest.id); }
     }
   }, [data]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -49,7 +50,7 @@ export default function Agents({ params, navigate, company }) {
     try {
       const r = await api(`/agents/${id}/run`, { method: 'POST', body: { company } });
       if (!r.run) toast(r.message, 'ai');
-      else { seen.current?.add(r.run.id); setSel(r.run.id); setFresh(r.run.id); setFollow(false); }
+      else { seen.current?.add(r.run.id); setSel(r.run.id); setFresh(null); setFollow(false); }
       reload();
     } finally { setRunning(null); }
   };
@@ -69,7 +70,11 @@ export default function Agents({ params, navigate, company }) {
         <div className="brand-mark" style={{ width: 38, height: 38, flex: 'none' }}><Bot size={19} /></div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <b>{agents.length} AI agents work on the live feed.</b> Each has a goal, a fixed set of tools and guardrails on what it may do alone. Every thought, tool call and decision is recorded below.
-          <div className="muted" style={{ fontSize: 11.5, marginTop: 2 }}>Reasoning engine: {model}</div>
+          <div className="row wrap" style={{ gap: 8, marginTop: 4, fontSize: 11.5 }}>
+            <span className={`engine-badge ${data.ai.enabled ? 'llm' : ''}`}><Sparkles size={11} />{model}</span>
+            {data.ai.enabled && <span className="muted">{fmt.n(data.ai.calls)} model calls · {fmt.n(data.ai.inputTokens + data.ai.outputTokens)} tokens · {data.ai.runsThisMinute}/{data.ai.budgetPerMinute} runs this minute</span>}
+            {data.ai.lastError && <span className="badge badge-bad" title={data.ai.lastError}>Last Gemini error: {data.ai.lastError.slice(0, 70)}</span>}
+          </div>
         </div>
         <Stat v={totals.runs} l="decisions" />
         <Stat v={totals.toolCalls} l="tool calls" />
@@ -151,9 +156,11 @@ export default function Agents({ params, navigate, company }) {
                   <span className="agent-dot" style={{ background: M.color }} />
                   <span style={{ flex: 1, minWidth: 0 }}>
                     <span className="run-title">{r.title}</span>
-                    <span className="muted" style={{ fontSize: 11.5 }}>{M.short} · {r.decision.label} · {agoShort(r.at)}</span>
+                    <span className="muted" style={{ fontSize: 11.5 }}>{M.short} · {r.decision?.label || 'Working…'} · {agoShort(r.at)}</span>
                   </span>
+                  {r.status === 'running' && <Loader2 size={13} className="spin" style={{ color: 'var(--ai)' }} />}
                   {r.status === 'awaiting' && <span className="badge badge-warn">Needs you</span>}
+                  <span className={`engine-badge ${r.engine !== 'rules' ? 'llm' : ''}`}>{r.engine === 'rules' ? 'Rules' : 'Gemini'}</span>
                 </button>
               );
             })}
@@ -181,11 +188,11 @@ function RunView({ run, animate, approval, onDecide, busy, navigate }) {
         <span className="agent-chip lg" style={{ '--c': M.color }}><M.icon size={14} />{M.short} agent</span>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontWeight: 700, fontSize: 15 }}>{run.title}</div>
-          <div className="muted" style={{ fontSize: 12 }}>{run.id} · {new Date(run.at).toLocaleTimeString('en-GB')} · {run.toolCalls} tool calls{run.subject?.priority && <> · <b style={{ color: PRIORITY_COLOR[run.subject.priority] }}>{run.subject.priority}</b> risk {run.subject.risk}</>}</div>
+          <div className="muted" style={{ fontSize: 12 }}>{run.id} · {new Date(run.at).toLocaleTimeString('en-GB')} · {run.steps.filter((x) => x.type === 'tool').length} tool calls · <span className={`engine-badge ${run.engine !== 'rules' ? 'llm' : ''}`}>{run.engine === 'rules' ? 'Rules engine' : `Gemini · ${run.engine}`}</span>{run.engineNote && <> · {run.engineNote}</>}{run.subject?.priority && <> · <b style={{ color: PRIORITY_COLOR[run.subject.priority] }}>{run.subject.priority}</b> risk {run.subject.risk}</>}</div>
         </div>
         <span className={`badge ${cls}`}>{label}</span>
       </div>
-      <AgentTrace key={run.id} steps={run.steps} animate={animate} onDone={() => setDone(true)} />
+      <AgentTrace key={run.id} steps={run.steps} animate={animate} running={run.status === 'running'} onDone={() => setDone(true)} />
       {done && run.plan && (
         <div className="table-wrap card" style={{ padding: 0, boxShadow: 'none', marginTop: 12 }}>
           <table className="t">
@@ -204,7 +211,7 @@ function RunView({ run, animate, approval, onDecide, busy, navigate }) {
           </table>
         </div>
       )}
-      {done && (
+      {done && run.decision && (
         <div className="row mt" style={{ gap: 8 }}>
           <span className="muted" style={{ fontSize: 12 }}><Wrench size={12} style={{ verticalAlign: -2 }} /> Confidence {Math.round(run.decision.confidence * 100)}%</span>
           <span className="sp" />

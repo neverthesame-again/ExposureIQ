@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Download, ScanLine, GitMerge, Gauge, Bot, Send, Ticket, BarChart3, LayoutDashboard } from 'lucide-react';
+import { Download, ScanLine, GitMerge, Gauge, Bot, Send, Ticket, BarChart3, LayoutDashboard, Loader2 } from 'lucide-react';
 import { fmt } from '../lib.jsx';
 
 export const SOURCE_META = {
@@ -73,10 +73,11 @@ export default function LivePipeline({ batch, totals }) {
                 {st.ai && (
                   <div className="lp-chips">
                     {[['triage', 'Triage Agent'], ['match', 'Asset-Match Agent']].map(([id, name]) => {
-                      const n = batch?.agentRuns?.filter((r) => r.agent === id).length || 0;
+                      const mine = batch?.agentRuns?.filter((r) => r.agent === id) || [];
+                      const working = mine.some((r) => r.action === 'running');
                       return (
-                        <span key={id} className={`lp-chip ${n && step >= i ? 'on' : ''}`} style={{ '--c': 'var(--ai)' }}>
-                          <Bot size={12} />{name}{n > 0 && step >= i && <em>{n}</em>}
+                        <span key={id} className={`lp-chip ${mine.length && step >= i ? 'on' : ''}`} style={{ '--c': 'var(--ai)' }}>
+                          {working && step >= i ? <Loader2 size={12} className="spin" /> : <Bot size={12} />}{name}{mine.length > 0 && step >= i && <em>{mine.length}</em>}
                         </span>
                       );
                     })}

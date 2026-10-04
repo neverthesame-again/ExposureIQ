@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Brain, Wrench, CheckCircle2, CornerDownRight, Bot, ScanSearch, CalendarClock, MessageSquareText } from 'lucide-react';
+import { Brain, Wrench, CheckCircle2, CornerDownRight, Bot, ScanSearch, CalendarClock, MessageSquareText, ShieldAlert } from 'lucide-react';
 
 export const AGENT_META = {
   triage: { icon: ScanSearch, color: 'var(--p2)', short: 'Triage' },
@@ -8,10 +8,11 @@ export const AGENT_META = {
   copilot: { icon: MessageSquareText, color: 'var(--ai)', short: 'Copilot' },
 };
 
-const argText = (args) => Object.entries(args || {}).map(([k, v]) => `${k}=${Array.isArray(v) ? `[${v.join(', ')}]` : JSON.stringify(v)}`).join(', ');
+const argVal = (v) => (Array.isArray(v) ? (v.some((x) => x && typeof x === 'object') ? `[${v.length} items]` : `[${v.join(', ')}]`) : typeof v === 'string' && v.length > 80 ? JSON.stringify(`${v.slice(0, 77)}…`) : JSON.stringify(v));
+const argText = (args) => Object.entries(args || {}).map(([k, v]) => `${k}=${argVal(v)}`).join(', ');
 
 // Renders an agent's trace. With `animate`, steps appear one by one, as if the agent were working live.
-export default function AgentTrace({ steps, animate = false, compact = false, onDone }) {
+export default function AgentTrace({ steps, animate = false, compact = false, running = false, onDone }) {
   const [shown, setShown] = useState(animate ? 0 : steps.length);
 
   useEffect(() => {
@@ -32,7 +33,7 @@ export default function AgentTrace({ steps, animate = false, compact = false, on
       {steps.slice(0, shown).map((s, i) => (
         <li key={i} className={`trace-step ${s.type}`}>
           <span className="trace-ico">
-            {s.type === 'thought' ? <Brain size={13} /> : s.type === 'tool' ? <Wrench size={13} /> : <CheckCircle2 size={13} />}
+            {s.type === 'thought' ? <Brain size={13} /> : s.type === 'tool' ? <Wrench size={13} /> : s.type === 'guardrail' ? <ShieldAlert size={13} /> : <CheckCircle2 size={13} />}
           </span>
           <div className="trace-body">
             {s.type === 'tool' ? (
@@ -41,12 +42,12 @@ export default function AgentTrace({ steps, animate = false, compact = false, on
                 <div className="trace-result"><CornerDownRight size={12} />{s.result}</div>
               </>
             ) : (
-              <div>{s.type === 'thought' ? <span className="trace-tag">Thinking</span> : <span className="trace-tag dec">Decision</span>}{s.text}</div>
+              <div>{s.type === 'thought' ? <span className="trace-tag">Thinking</span> : s.type === 'guardrail' ? <span className="trace-tag guard">Guardrail</span> : <span className="trace-tag dec">Decision</span>}{s.text}</div>
             )}
           </div>
         </li>
       ))}
-      {shown < steps.length && <li className="trace-step pending"><span className="trace-ico"><span className="typing"><span /><span /><span /></span></span></li>}
+      {(shown < steps.length || running) && <li className="trace-step pending"><span className="trace-ico"><span className="typing"><span /><span /><span /></span></span></li>}
     </ol>
   );
 }

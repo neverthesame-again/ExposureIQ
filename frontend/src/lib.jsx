@@ -74,6 +74,13 @@ export function useLive(company, paused) {
       const d = JSON.parse(e.data);
       setS((p) => ({ ...p, status: 'live', view: d, baseline: p.baseline || d.kpis, recent: d.recent, history: [d.kpis], batch: d.recent[0] || null }));
     });
+    // Agents finish after the batch: replace the batch in place (same id, so animations don't restart).
+    es.addEventListener('batchUpdate', (e) => {
+      const d = JSON.parse(e.data);
+      const swap = (b) => (b.id === d.batch.id ? d.batch : b);
+      queue.current = queue.current.map((q) => (q.batch.id === d.batch.id ? d : q));
+      setS((p) => ({ ...p, view: d, recent: p.recent.map(swap), batch: p.batch && p.batch.id === d.batch.id ? d.batch : p.batch }));
+    });
     es.addEventListener('batch', (e) => {
       const d = JSON.parse(e.data);
       if (pausedRef.current) { queue.current.push(d); setS((p) => ({ ...p, queued: queue.current.length })); }

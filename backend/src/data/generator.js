@@ -3,6 +3,8 @@
 // into one unified, de-duplicated finding per (asset, vulnerability).
 import { COMPANIES, SLA_POLICY, TOOL_COVERAGE } from './companies.js';
 import { CATALOG } from './catalog.js';
+import { createHash } from 'node:crypto';
+import { config } from '../config.js';
 
 export const DAY = 86400000;
 export const WINDOW = 420; // days of history we simulate (UI shows the last ~180)
@@ -240,36 +242,66 @@ export function slaState(f) {
   return 'On track';
 }
 
-const assets = buildAssets();
-const { findings, blindSpots } = buildFindings(assets);
-findings.forEach((f) => { f.sla = slaState(f); });
-
-// Seed ServiceNow tickets for part of the open urgent work, so the POC shows both states.
-const tickets = [];
-let ticketSeq = 4120;
-const seen = new Set();
-for (const f of findings) {
-  const key = `${f.cve}|${f.company}`;
-  if (f.status !== 'Open' || seen.has(key)) continue;
-  seen.add(key);
-  if ((f.priority === 'P1' || f.priority === 'P2') && r() < 0.45) {
-    tickets.push({
-      id: `VIT${String(ticketSeq++).padStart(7, '0')}`,
-      cve: f.cve,
-      company: f.company,
-      createdAgo: Math.max(0, f.detectedAgo - 1 - r() * 3),
-      state: pick(['New', 'In Progress', 'In Progress', 'Awaiting Change Window']),
-      assignee: assets.find((a) => a.id === f.assetId).owner,
-      createdBy: 'ExposureIQ automation',
-    });
-  }
+// Stable identifiers each tool would hold for a device, derived from the asset id so they never change.
+const sha = (x) => createHash('sha1').update(x).digest('hex');
+function identities(a) {
+  const h = (k) => sha(a.id + k);
+  const g = h('aad');
+  return {
+    fqdn: `${a.hostname.toLowerCase()}.${a.company}.shv.local`,
+    mac: h('mac').slice(0, 12).match(/../g).join(':').toUpperCase(),
+    serial: h('serial').slice(0, 10).toUpperCase(),
+    cmdbSysId: h('cmdb').slice(0, 32),
+    mdeId: a.mde ? h('mde') : null,
+    aadDeviceId: a.mde && a.type !== 'Network Device' && a.type !== 'OT / IoT' ? `${g.slice(0, 8)}-${g.slice(8, 12)}-${g.slice(12, 16)}-${g.slice(16, 20)}-${g.slice(20, 32)}` : null,
+    r7Id: a.r7 ? (parseInt(h('r7').slice(0, 6), 16) % 900000) + 1000 : null,
+  };
 }
 
+let ticketSeq = 4120;
 export const store = {
-  assets,
-  assetById: Object.fromEntries(assets.map((a) => [a.id, a])),
-  findings,
-  blindSpots,
-  tickets,
+  assets: [],
+  assetById: {},
+  findings: [],
+  blindSpots: 0,
+  tickets: [],
   nextTicket: () => `VIT${String(ticketSeq++).padStart(7, '0')}`,
+  setTicketSeq: (n) => { ticketSeq = n; },
+  getTicketSeq: () => ticketSeq,
+  addAsset(a) { this.assets.push(a); this.assetById[a.id] = a; return a; },
 };
+
+// Mock mode: build ~13 months of history for the simulated SHV estate. In live mode the store starts
+// empty (or from data/state.json) and is filled only by real connector syncs.
+function seedMock() {
+  const assets = buildAssets();
+  assets.forEach((a) => Object.assign(a, identities(a)));
+  const { findings, blindSpots } = buildFindings(assets);
+  findings.forEach((f) => { f.sla = slaState(f); });
+
+  // Seed ServiceNow tickets for part of the open urgent work, so the POC shows both states.
+  const tickets = [];
+  const seen = new Set();
+  for (const f of findings) {
+    const key = `${f.cve}|${f.company}`;
+    if (f.status !== 'Open' || seen.has(key)) continue;
+    seen.add(key);
+    if ((f.priority === 'P1' || f.priority === 'P2') && r() < 0.45) {
+      tickets.push({
+        id: store.nextTicket(),
+        cve: f.cve,
+        company: f.company,
+        createdAgo: Math.max(0, f.detectedAgo - 1 - r() * 3),
+        state: pick(['New', 'In Progress', 'In Progress', 'Awaiting Change Window']),
+        assignee: assets.find((a) => a.id === f.assetId).owner,
+        createdBy: 'ExposureIQ automation',
+      });
+    }
+  }
+  assets.forEach((a) => store.addAsset(a));
+  store.findings.push(...findings);
+  store.blindSpots = blindSpots;
+  store.tickets.push(...tickets);
+}
+
+if (config.mode === 'mock') seedMock();

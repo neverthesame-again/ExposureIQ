@@ -4,3 +4,5 @@ dist/
 .env.*
 *.log
 .claude/
+backend/data/
+!.env.example

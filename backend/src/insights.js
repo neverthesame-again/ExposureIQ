@@ -1,6 +1,7 @@
 // "GenAI" layer (simulated). In production these narratives would be produced by an LLM
 // (e.g. Azure OpenAI) grounded on the same computed metrics. Here they are templated from
 // live numbers, so the text always matches the dashboards.
+import { ai } from './ai/gemini.js';
 import { COMPANIES, SLA_POLICY } from './data/companies.js';
 import { catalogById } from './data/catalog.js';
 import { store, isoAgo } from './data/generator.js';
@@ -284,7 +285,7 @@ export function integrations() {
     { id: 'snow', name: 'ServiceNow Vulnerability Response', vendor: 'ServiceNow', role: 'Remediation ticketing (optional)', status: 'Connected', method: 'REST · sn_vul_vulnerable_item', frequency: 'On demand', records: store.tickets.length, recordLabel: 'remediation tasks', syncAgoMin: 5, fields: ['number', 'state', 'assignment_group', 'due_date'] },
     { id: 'kev', name: 'CISA KEV & FIRST EPSS', vendor: 'Public threat intel', role: 'Exploitation enrichment', status: 'Connected', method: 'JSON feeds', frequency: 'Daily', records: 1340, recordLabel: 'KEV entries', syncAgoMin: 190, fields: ['cveID', 'dateAdded', 'epss', 'percentile'] },
     { id: 'pbi', name: 'Power BI', vendor: 'Microsoft', role: 'Executive reporting layer', status: 'Publishing', method: 'Semantic model push · Fabric workspace "Group Security"', frequency: 'Every 4 h', records: 6, recordLabel: 'report pages', syncAgoMin: 36, fields: ['FactFinding', 'DimAsset', 'DimCompany', 'DimDate', 'FactExposureDaily'] },
-    { id: 'aoai', name: 'Azure OpenAI', vendor: 'Microsoft', role: 'Reasoning model behind the 4 AI agents', status: 'Simulated', method: 'Agents call ExposureIQ tools; grounded on computed metrics (EU data boundary)', frequency: 'On demand', records: 0, recordLabel: 'no data stored', syncAgoMin: null, fields: ['metrics context only — no raw host data sent'] },
+    { id: 'aoai', name: 'Google Gemini', vendor: 'Google', role: 'Reasoning model behind the 4 AI agents', status: ai.enabled ? 'Connected' : 'Not configured', method: `${ai.model} · function calling over ExposureIQ tools`, frequency: 'On demand', records: 0, recordLabel: 'no data stored', syncAgoMin: null, fields: ['metrics context only — no raw host data sent'] },
   ];
   return base.map((b) => ({ ...b, ...(syncState[b.id] || {}), lastSync: b.syncAgoMin == null ? null : new Date(Date.now() - (syncState[b.id]?.syncAgoMin ?? b.syncAgoMin) * 60000).toISOString() }));
 }
