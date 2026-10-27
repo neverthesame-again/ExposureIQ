@@ -243,7 +243,7 @@ export function slaState(f) {
 }
 
 // Stable identifiers each tool would hold for a device, derived from the asset id so they never change.
-const sha = (x) => createHash('sha1').update(x).digest('hex');
+const sha = (x) => createHash('sha256').update(x).digest('hex');
 function identities(a) {
   const h = (k) => sha(a.id + k);
   const g = h('aad');

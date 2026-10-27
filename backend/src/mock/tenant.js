@@ -13,7 +13,7 @@ import { store, NOW, DAY } from '../data/generator.js';
 import { defenderIdFor, rapid7KeyFor } from '../data/crosswalk.js';
 import { r7NameFor } from '../analytics.js';
 
-const sha = (x) => createHash('sha1').update(String(x)).digest('hex');
+const sha = (x) => createHash('sha256').update(String(x)).digest('hex');
 const rnd = Math.random;
 const pick = (a) => a[Math.floor(rnd() * a.length)];
 const weighted = (pairs) => {
