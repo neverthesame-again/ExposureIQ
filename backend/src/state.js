@@ -44,7 +44,13 @@ export function restoreState() {
   if (config.mode !== 'live' || !existsSync(FILE)) return null;
   const data = JSON.parse(readFileSync(FILE, 'utf8'));
   for (const c of data.catalog || []) {
-    if (catalogById[c.id]) Object.assign(catalogById[c.id], c);
+    if (catalogById[c.id]) {
+      // Copy only expected/allowed fields from persisted data to avoid mass-assignment
+      // or prototype pollution from untrusted file contents.
+      const existing = catalogById[c.id];
+      const allowed = ['kev', 'epss', 'exploit', 'detect', 'discovered', 'title'];
+      for (const k of allowed) if (Object.prototype.hasOwnProperty.call(c, k)) existing[k] = c[k];
+    }
     else { CATALOG.push(c); catalogById[c.id] = c; }
   }
   for (const a of data.assets || []) store.addAsset({ ...a, lastSeenAgo: toAgo(a.lastSeenAt) });
